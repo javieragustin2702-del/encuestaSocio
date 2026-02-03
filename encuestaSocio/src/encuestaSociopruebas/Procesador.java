@@ -7,6 +7,10 @@ import java.util.*;
 
 public class Procesador {
 
+    // Bloque fijo según tu Excel
+    private static final int ALTURA_BLOQUE = 7; // año + 6 filas
+    private static final int ANCHO_BLOQUE  = 6; // 2019–2024
+
     private static final Map<String, String> TRADUCTOR = new HashMap<>();
     static {
         TRADUCTOR.put("F.B. Básica", "FPB");
@@ -18,141 +22,188 @@ public class Procesador {
     }
 
     public static void main(String[] args) {
-        // DINÁMICO: El año nuevo es siempre el anterior al actual
-        int añoNuevo = LocalDate.now().getYear() - 1; 
 
-        File fOrigen = new File("src/fichero/EncuestaSocio.xlsx");
+        int añoViejo = LocalDate.now().getYear() - 7;
+        int añoNuevo = LocalDate.now().getYear() - 1;
+
+        File fOrigen    = new File("src/fichero/EncuestaSocio.xlsx");
         File fPlantilla = new File("src/fichero/EvolucionEncuestaSocio.xlsx");
         File fResultado = new File("src/fichero/Evolucion_Actualizada.xlsx");
 
-        try (FileInputStream fisO = new FileInputStream(fOrigen);
-             Workbook wbO = WorkbookFactory.create(fisO);
-             FileInputStream fisP = new FileInputStream(fPlantilla);
-             Workbook wbD = WorkbookFactory.create(fisP)) {
+        try (
+                Workbook wbOrigen = WorkbookFactory.create(new FileInputStream(fOrigen));
+                Workbook wbDestino = WorkbookFactory.create(new FileInputStream(fPlantilla))
+        ) {
 
-            Sheet hojaDestino = wbD.getSheetAt(0);
-            
-            // 1. Buscamos el año más antiguo presente en la plantilla para saber qué "aplastar"
-            int añoViejo = buscarAñoMasAntiguo(hojaDestino);
-            System.out.println("🔍 Detectado año más antiguo en plantilla: " + añoViejo);
-            System.out.println("📅 Preparando inserción de datos para: " + añoNuevo);
+            Sheet hojaDestino = wbDestino.getSheetAt(0);
+            Sheet hojaOrigen  = wbOrigen.getSheetAt(0);
 
-            // 2. Cargamos datos nuevos
-            Map<String, Map<String, List<Double>>> datosNuevos = cargarDatosOrigen(wbO.getSheetAt(0));
+            // 1️⃣ cargar datos del Excel origen
+            Map<String, Map<String, List<Double>>> datosOrigen =
+                    cargarDatosOrigen(hojaOrigen);
 
-            // 3. Ejecutamos el desplazamiento dinámico
-            evolucionarDinamico(hojaDestino, datosNuevos, añoViejo, añoNuevo);
+            // 2️⃣ mover bloque + escribir año nuevo (YA FUNCIONABA)
+            moverBloqueIzquierdaDesdeAño(
+                    hojaDestino, añoViejo, añoNuevo, datosOrigen
+            );
 
             try (FileOutputStream fos = new FileOutputStream(fResultado)) {
-                wbD.write(fos);
-                System.out.println("✅ ¡Archivo generado con éxito!");
+                wbDestino.write(fos);
             }
 
+            System.out.println("✅ Archivo nuevo generado correctamente");
+            System.out.println(fResultado.getAbsolutePath());
+
         } catch (Exception e) {
-            System.err.println("❌ Error: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    private static int buscarAñoMasAntiguo(Sheet hoja) {
-        int minAño = Integer.MAX_VALUE;
-        for (Row row : hoja) {
-            for (Cell cell : row) {
-                if (cell.getCellType() == CellType.NUMERIC) {
-                    double val = cell.getNumericCellValue();
-                    if (val > 1900 && val < 2100) { // Rango razonable de años
-                        minAño = Math.min(minAño, (int)val);
-                    }
-                }
-            }
-        }
-        return (minAño == Integer.MAX_VALUE) ? 2019 : minAño;
-    }
+    // =====================================================
+    // MOVER BLOQUE + AÑO NUEVO + DATOS
+    // =====================================================
 
-    private static void evolucionarDinamico(Sheet hoja, Map<String, Map<String, List<Double>>> datos, int añoViejo, int añoNuevo) {
-        List<Integer> columnasAncla = new ArrayList<>();
-        
-        // Localizar todas las columnas donde empieza un bloque (donde esté el año más viejo)
-        for (Row row : hoja) {
-            for (Cell cell : row) {
-                if (esCeldaValor(cell, añoViejo)) {
-                    if (!columnasAncla.contains(cell.getColumnIndex())) columnasAncla.add(cell.getColumnIndex());
-                }
-            }
-        }
+    private static void moverBloqueIzquierdaDesdeAño(
+            Sheet hoja,
+            int añoViejo,
+            int añoNuevo,
+            Map<String, Map<String, List<Double>>> datosOrigen
+    ) {
 
         String seccionActual = "";
 
-        for (int f = 0; f <= hoja.getLastRowNum(); f++) {
-            Row row = hoja.getRow(f);
+        for (Row row : hoja) {
             if (row == null) continue;
 
-            String label = getCellString(row.getCell(0));
-            if (!label.isEmpty() && !TRADUCTOR.containsValue(label)) {
-                seccionActual = label.replace(":", "").trim();
+            String col0 = normalizar(getCellString(row.getCell(0)));
+            if (!col0.isEmpty() && !TRADUCTOR.containsKey(col0)) {
+                seccionActual = col0.replace(":", "").trim();
             }
 
-            for (int i = 0; i < columnasAncla.size(); i++) {
-                int colInicio = columnasAncla.get(i);
-                
-                // --- MOVIMIENTO DE VENTANA (Desplazar a la izquierda) ---
-                // Asumimos que el bloque termina cuando hay una celda vacía o después de 5-6 años
-                int anchoBloque = detectarAnchoBloque(hoja, colInicio);
-                
-                for (int c = colInicio; c < colInicio + anchoBloque - 1; c++) {
-                    Cell destino = getOrCreateCell(row, c);
-                    Cell origen = row.getCell(c + 1);
-                    if (origen != null) copiarCelda(origen, destino);
+            for (Cell cell : row) {
+
+                if (esCeldaValor(cell, añoViejo)) {
+
+                    int colInicio  = cell.getColumnIndex();
+                    int filaInicio = row.getRowNum();
+
+                    // --- mover bloque (NO TOCADO) ---
+                    for (int f = filaInicio; f < filaInicio + ALTURA_BLOQUE; f++) {
+
+                        Row r = hoja.getRow(f);
+                        if (r == null) continue;
+
+                        for (int c = colInicio + 1; c < colInicio + ANCHO_BLOQUE; c++) {
+
+                            Cell origen  = r.getCell(c);
+                            Cell destino = r.getCell(c - 1);
+
+                            if (destino == null) {
+                                destino = r.createCell(c - 1);
+                            }
+
+                            if (origen != null) {
+                                copiarCelda(origen, destino);
+                            } else {
+                                destino.setBlank();
+                            }
+                        }
+
+                        Cell ultima = r.getCell(colInicio + ANCHO_BLOQUE - 1);
+                        if (ultima != null) ultima.setBlank();
+                    }
+
+                    // --- escribir año nuevo ---
+                    Row filaAño = hoja.getRow(filaInicio);
+                    Cell celdaAñoNueva = filaAño.getCell(colInicio + ANCHO_BLOQUE - 1);
+                    if (celdaAñoNueva == null) {
+                        celdaAñoNueva = filaAño.createCell(colInicio + ANCHO_BLOQUE - 1);
+                    }
+                    celdaAñoNueva.setCellValue(añoNuevo);
+
+                    // --- insertar datos debajo (CORREGIDO) ---
+                    String ciclo = normalizar(getCellString(filaAño.getCell(0)));
+
+                    insertarDatosNuevoAño(
+                            hoja,
+                            filaInicio,
+                            colInicio + ANCHO_BLOQUE - 1,
+                            seccionActual,
+                            ciclo,
+                            datosOrigen
+                    );
                 }
-
-                // --- INSERTAR DATO NUEVO EN LA ÚLTIMA COLUMNA ---
-                int colFinal = colInicio + anchoBloque - 1;
-                Cell celdaNueva = getOrCreateCell(row, colFinal);
-
-                if (esCeldaValor(row.getCell(colInicio), añoViejo + 1)) {
-                    celdaNueva.setCellValue(añoNuevo);
-                } else if (TRADUCTOR.containsValue(label)) {
-                    insertarDatoEncuesta(celdaNueva, datos, seccionActual, label, i);
-                }
             }
         }
     }
 
-    private static int detectarAnchoBloque(Sheet hoja, int colInicio) {
-        // Busca en la fila 2 (donde suelen estar los años) cuántos años seguidos hay
-        Row row = hoja.getRow(2); 
-        int ancho = 0;
-        while (row != null && esCeldaNumerica(row.getCell(colInicio + ancho))) {
-            ancho++;
-            if (ancho > 10) break; // Seguridad
+    // =====================================================
+    // INSERTAR DATOS DEL NUEVO AÑO (VERSIÓN CORRECTA)
+    // =====================================================
+
+    private static void insertarDatosNuevoAño(
+            Sheet hoja,
+            int filaInicio,
+            int colNueva,
+            String seccion,
+            String cicloIgnorado, // ya no se usa
+            Map<String, Map<String, List<Double>>> datos
+    ) {
+
+        if (!datos.containsKey(seccion)) return;
+
+        // recorrer las 6 filas de datos
+        for (int i = 0; i < 6; i++) {
+
+            Row filaDato = hoja.getRow(filaInicio + 1 + i);
+            if (filaDato == null) continue;
+
+            // 🔑 el ciclo se obtiene AQUÍ
+            String sigla = normalizar(getCellString(filaDato.getCell(0)));
+
+            if (!datos.get(seccion).containsKey(sigla)) continue;
+
+            List<Double> valores = datos.get(seccion).get(sigla);
+
+            // 👉 SIEMPRE el último valor
+            double valorNuevo = valores.get(valores.size() - 1);
+
+            Cell destino = filaDato.getCell(colNueva);
+            if (destino == null) destino = filaDato.createCell(colNueva);
+
+            destino.setCellValue(valorNuevo);
         }
-        return (ancho == 0) ? 5 : ancho; // Por defecto 5 si no detecta
     }
 
-    private static void insertarDatoEncuesta(Cell celda, Map<String, Map<String, List<Double>>> datos, String sec, String ciclo, int index) {
-        if (datos.containsKey(sec) && datos.get(sec).containsKey(ciclo)) {
-            List<Double> valores = datos.get(sec).get(ciclo);
-            if (index < valores.size()) {
-                celda.setCellValue(valores.get(index));
-            }
-        }
-    }
+
+    // =====================================================
+    // CARGAR DATOS ORIGEN
+    // =====================================================
 
     private static Map<String, Map<String, List<Double>>> cargarDatosOrigen(Sheet hoja) {
+
         Map<String, Map<String, List<Double>>> datos = new HashMap<>();
         String seccion = "";
+
         for (Row row : hoja) {
-            String col0 = getCellString(row.getCell(0));
+            String col0 = normalizar(getCellString(row.getCell(0)));
             if (col0.isEmpty()) continue;
+
             if (TRADUCTOR.containsKey(col0)) {
+
                 String sigla = TRADUCTOR.get(col0);
                 List<Double> valores = new ArrayList<>();
-                for (int c = 1; c < 15; c++) {
+
+                for (int c = 1; c <= 6; c++) {
                     Cell cell = row.getCell(c);
-                    if (cell != null && cell.getCellType() == CellType.NUMERIC) valores.add(cell.getNumericCellValue());
+                    if (cell != null && cell.getCellType() == CellType.NUMERIC) {
+                        valores.add(cell.getNumericCellValue());
+                    }
                 }
+
                 datos.putIfAbsent(seccion, new HashMap<>());
                 datos.get(seccion).put(sigla, valores);
+
             } else {
                 seccion = col0.replace(":", "").trim();
             }
@@ -160,30 +211,43 @@ public class Procesador {
         return datos;
     }
 
-    // --- UTILS ---
-    private static boolean esCeldaValor(Cell c, int val) {
-        return c != null && c.getCellType() == CellType.NUMERIC && (int)c.getNumericCellValue() == val;
+    // =====================================================
+    // NORMALIZACIÓN
+    // =====================================================
+
+    private static String normalizar(String texto) {
+        if (texto == null) return "";
+        return texto
+                .replace("Ã¡", "á")
+                .replace("Ã©", "é")
+                .replace("Ã­", "í")
+                .replace("Ã³", "ó")
+                .replace("Ãº", "ú")
+                .replace("Ã±", "ñ")
+                .replace("Ã", "Á")
+                .trim();
     }
 
-    private static boolean esCeldaNumerica(Cell c) {
-        return c != null && c.getCellType() == CellType.NUMERIC;
+    // =====================================================
+    // UTILIDADES
+    // =====================================================
+
+    private static boolean esCeldaValor(Cell c, int val) {
+        return c != null && c.getCellType() == CellType.NUMERIC
+                && (int) c.getNumericCellValue() == val;
     }
 
     private static String getCellString(Cell c) {
         return (c == null) ? "" : c.toString().trim();
     }
 
-    private static Cell getOrCreateCell(Row r, int c) {
-        Cell cell = r.getCell(c);
-        return (cell == null) ? r.createCell(c) : cell;
-    }
-
     private static void copiarCelda(Cell origen, Cell destino) {
         switch (origen.getCellType()) {
-            case NUMERIC: destino.setCellValue(origen.getNumericCellValue()); break;
-            case STRING: destino.setCellValue(origen.getStringCellValue()); break;
-            case FORMULA: destino.setCellFormula(origen.getCellFormula()); break;
-            default: destino.setBlank();
+            case NUMERIC -> destino.setCellValue(origen.getNumericCellValue());
+            case STRING  -> destino.setCellValue(origen.getStringCellValue());
+            case FORMULA -> destino.setCellFormula(origen.getCellFormula());
+            case BOOLEAN -> destino.setCellValue(origen.getBooleanCellValue());
+            default      -> destino.setBlank();
         }
     }
 }
