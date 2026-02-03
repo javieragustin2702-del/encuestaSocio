@@ -16,14 +16,13 @@ public class Procesador {
         // =========================
         // 1. RUTAS DE LOS ARCHIVOS
         // =========================
-        String rutaEncuesta    = "src/fichero/EncuestaSocio.xlsx";           // Excel con datos nuevos (2025)
-        String rutaTablas = "src/fichero/EvolucionEncuestaSocio.xlsx";  // Excel histórico
-        String rutaSalida    = "src/fichero/Evolucion_2025.xlsx";          // Nuevo archivo generado
+        String rutaEncuesta = "src/fichero/EncuestaSocio.xlsx";
+        String rutaTablas   = "src/fichero/EvolucionEncuestaSocio.xlsx";
+        String rutaSalida   = "src/fichero/Evolucion_2025.xlsx";
 
         // =========================
         // 2. TRADUCTOR DE NOMBRES
         // =========================
-        // Relaciona el nombre largo del ciclo con su sigla corta
         Map<String, String> traductor = new HashMap<>();
         traductor.put("F.B. Básica", "FPB");
         traductor.put("G.M. Administración", "GMA");
@@ -34,9 +33,6 @@ public class Procesador {
 
         System.out.println("=== Iniciando actualización anual de la encuesta ===");
 
-        // =========================
-        // 3. APERTURA DE EXCEL
-        // =========================
         try (
             FileInputStream fisOrigen = new FileInputStream(new File(rutaEncuesta));
             Workbook wbOrigen = new XSSFWorkbook(fisOrigen);
@@ -49,12 +45,10 @@ public class Procesador {
             Sheet hojaDestino = wbDestino.getSheetAt(0);
 
             // =========================
-            // 4. EXTRAER DATOS NUEVOS
+            // 3. EXTRAER DATOS NUEVOS
             // =========================
-            // Guardamos los datos en un Map: "DAM" -> 21.5
             Map<String, Double> datosNuevos = new HashMap<>();
 
-            // Recorremos las filas donde está la media de edad (filas 1 a 6)
             for (int i = 1; i <= 6; i++) {
                 Row fila = hojaOrigen.getRow(i);
                 if (fila == null) continue;
@@ -62,22 +56,21 @@ public class Procesador {
                 String nombreLargo = fila.getCell(0).getStringCellValue();
                 double valor       = fila.getCell(1).getNumericCellValue();
 
-                // Convertimos nombre largo a sigla
                 if (traductor.containsKey(nombreLargo)) {
                     String sigla = traductor.get(nombreLargo);
                     datosNuevos.put(sigla, valor);
                 }
             }
 
-            System.out.println("Datos nuevos extraídos: " + datosNuevos);
+            System.out.println("Datos nuevos: " + datosNuevos);
 
             // =========================
-            // 5. ACTUALIZAR HISTÓRICO
+            // 4. ACTUALIZAR TODAS LAS TABLAS
             // =========================
             procesarTablaMediaEdad(hojaDestino, datosNuevos);
 
             // =========================
-            // 6. GUARDAR ARCHIVO NUEVO
+            // 5. GUARDAR RESULTADO
             // =========================
             try (FileOutputStream fos = new FileOutputStream(rutaSalida)) {
                 wbDestino.write(fos);
@@ -85,98 +78,92 @@ public class Procesador {
             }
 
         } catch (Exception e) {
-            System.err.println("Error durante el proceso: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
     /**
-     * Actualiza la tabla de "Media de edad":
-     * - Mueve los valores antiguos a la izquierda
-     * - Inserta los datos nuevos del año actual
+     * Procesa TODAS las tablas de la hoja:
+     * - Detecta cada cabecera de años
+     * - Desplaza los valores a la izquierda
+     * - Inserta el valor nuevo del año actual
+     * - Limpia columnas sobrantes para evitar duplicados
      */
     private static void procesarTablaMediaEdad(Sheet hoja, Map<String, Double> datosNuevos) {
 
-        int colInicio = 1; // Columna B (primer año visible)
-        int colFin    = 6; // Última columna (año más reciente)
+        int colInicio = 1; // Columna B
+        int colFin    = 6; // Columna G
 
-        // =========================
-        // 1. BUSCAR FILA DE AÑOS
-        // =========================
-        int filaAnios = -1;
+        for (Row filaAnios : hoja) {
 
-        for (Row row : hoja) {
-            Cell celda = row.getCell(colInicio);
-            if (celda != null 
-                && celda.getCellType() == CellType.NUMERIC 
-                && celda.getNumericCellValue() > 2000) {
+            Cell posibleAnio = filaAnios.getCell(colInicio);
 
-                filaAnios = row.getRowNum();
-                actualizarEncabezadosAnios(row, colInicio, colFin);
-                break;
-            }
-        }
+            // Detectamos fila de encabezados (años)
+            if (posibleAnio != null &&
+                posibleAnio.getCellType() == CellType.NUMERIC &&
+                posibleAnio.getNumericCellValue() > 2000) {
 
-        if (filaAnios == -1) {
-            System.out.println("⚠️ No se encontró la fila de encabezados de años.");
-            return;
-        }
+                // 1️⃣ Actualizar encabezados
+                actualizarEncabezadosAnios(filaAnios, colInicio, colFin);
 
-        // =========================
-        // 2. RECORRER CICLOS
-        // =========================
-        for (Row row : hoja) {
+                int filaDatosActual = filaAnios.getRowNum() + 1;
 
-            Cell celdaSigla = row.getCell(0);
-            if (celdaSigla == null) continue;
+                // 2️⃣ Recorrer filas de la tabla
+                while (true) {
+                    Row filaDatos = hoja.getRow(filaDatosActual);
+                    if (filaDatos == null) break;
 
-            String sigla = celdaSigla.toString();
+                    Cell celdaSigla = filaDatos.getCell(0);
+                    if (celdaSigla == null || celdaSigla.toString().isBlank()) break;
 
-            if (datosNuevos.containsKey(sigla)) {
+                    String sigla = celdaSigla.toString().trim();
 
-                // ---- A) DESPLAZAR VALORES A LA IZQUIERDA ----
-                for (int c = colInicio; c < colFin; c++) {
-                    Cell origen  = row.getCell(c + 1);
-                    Cell destino = row.getCell(c);
+                    if (datosNuevos.containsKey(sigla)) {
 
-                    if (origen != null) {
-                        if (destino == null) destino = row.createCell(c);
+                        // Mover datos a la izquierda
+                        for (int c = colInicio; c < colFin; c++) {
+                            Cell origen  = filaDatos.getCell(c + 1);
+                            Cell destino = filaDatos.getCell(c);
 
-                        if (origen.getCellType() == CellType.NUMERIC) {
-                            destino.setCellValue(origen.getNumericCellValue());
-                        } else {
-                            destino.setCellValue(origen.toString());
+                            if (destino == null) destino = filaDatos.createCell(c);
+
+                            if (origen != null && origen.getCellType() == CellType.NUMERIC) {
+                                destino.setCellValue(origen.getNumericCellValue());
+                            } else {
+                                destino.setBlank();
+                            }
+                        }
+
+                        // Insertar nuevo dato
+                        Cell celdaNueva = filaDatos.getCell(colFin);
+                        if (celdaNueva == null) celdaNueva = filaDatos.createCell(colFin);
+
+                        celdaNueva.setCellValue(datosNuevos.get(sigla));
+
+                        // Limpiar columnas sobrantes (el problema que tenías)
+                        for (int c = colFin + 1; c <= colFin + 5; c++) {
+                            Cell sobrante = filaDatos.getCell(c);
+                            if (sobrante != null) filaDatos.removeCell(sobrante);
                         }
                     }
+
+                    filaDatosActual++;
                 }
-
-                // ---- B) INSERTAR EL DATO NUEVO EN LA ÚLTIMA COLUMNA ----
-                Cell celdaNueva = row.getCell(colFin);
-                if (celdaNueva == null) celdaNueva = row.createCell(colFin);
-
-                double valorNuevo = datosNuevos.get(sigla);
-                celdaNueva.setCellValue(valorNuevo);
-
-                System.out.println("→ " + sigla + " actualizado con el valor " + valorNuevo);
             }
         }
     }
 
     /**
-     * Actualiza los años del encabezado (por ejemplo: 2020 a 2025)
+     * Actualiza los años del encabezado
      */
     private static void actualizarEncabezadosAnios(Row row, int colInicio, int colFin) {
 
-        int anio = 2020; // Nuevo primer año visible
+        int anio = 2020; // ajusta si quieres que empiece en otro año
 
         for (int c = colInicio; c <= colFin; c++) {
             Cell celda = row.getCell(c);
             if (celda == null) celda = row.createCell(c);
-
-            celda.setCellValue(anio);
-            anio++;
+            celda.setCellValue(anio++);
         }
-
-        System.out.println("Encabezados de años actualizados.");
     }
 }
